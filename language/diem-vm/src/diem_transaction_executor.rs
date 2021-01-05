@@ -573,6 +573,60 @@ impl DiemVM {
         ))
     }
 
+
+    fn execute_single_txn(&mut
+            self,
+            data_cache: &mut StateViewCache,
+            txn : &Result<PreprocessedTransaction, VMStatus>,
+            log_context : &impl LogContext,
+        ) -> Result<(VMStatus, TransactionOutput, Option<String>), VMStatus> {
+        let (vm_status, output, sender) = match txn {
+            Ok(PreprocessedTransaction::BlockPrologue(block_metadata)) => {
+                // execute_block_trace_guard.clear();
+                // current_block_id = block_metadata.id();
+                // trace_code_block!("diem_vm::execute_block_impl", {"block", current_block_id}, execute_block_trace_guard);
+                let (vm_status, output) =
+                    self.process_block_prologue(data_cache, block_metadata.clone(), log_context)?;
+                (vm_status, output, Some("block_prologue".to_string()))
+            }
+            Ok(PreprocessedTransaction::WaypointWriteSet(write_set_payload)) => {
+                let (vm_status, output) = self.process_waypoint_change_set(
+                    data_cache,
+                    write_set_payload.clone(),
+                    log_context,
+                )?;
+                (vm_status, output, Some("waypoint_write_set".to_string()))
+            }
+            Ok(PreprocessedTransaction::UserTransaction(txn)) => {
+                let sender = txn.sender().to_string();
+                let _timer = TXN_TOTAL_SECONDS.start_timer();
+                let (vm_status, output) =
+                    self.execute_user_transaction(data_cache, txn, log_context);
+
+                // Increment the counter for user transactions executed.
+                let counter_label = match output.status() {
+                    TransactionStatus::Keep(_) => Some("success"),
+                    TransactionStatus::Discard(_) => Some("discarded"),
+                    TransactionStatus::Retry => None,
+                };
+                if let Some(label) = counter_label {
+                     USER_TRANSACTIONS_EXECUTED.with_label_values(&[label]).inc();
+                }
+                (vm_status, output, Some(sender))
+            }
+            Ok(PreprocessedTransaction::WriteSet(txn)) => {
+                let (vm_status, output) =
+                    self.process_writeset_transaction(data_cache, *txn.clone(), log_context)?;
+                (vm_status, output, Some("write_set".to_string()))
+            }
+            Err(e) => {
+                let (vm_status, output) = discard_error_vm_status(e.clone());
+                (vm_status, output, None)
+            }
+        };
+        Ok((vm_status, output, sender))
+    }
+
     fn execute_block_impl(
         &mut self,
         transactions: Vec<Transaction>,
@@ -580,8 +634,8 @@ impl DiemVM {
     ) -> Result<Vec<(VMStatus, TransactionOutput)>, VMStatus> {
         let count = transactions.len();
         let mut result = vec![];
-        let mut current_block_id;
-        let mut execute_block_trace_guard = vec![];
+        // let mut current_block_id;
+        // let mut execute_block_trace_guard = vec![];
         let mut should_restart = false;
 
         info!(
@@ -614,50 +668,7 @@ impl DiemVM {
                 debug!(log_context, "Retry after reconfiguration");
                 continue;
             };
-            let (vm_status, output, sender) = match txn {
-                Ok(PreprocessedTransaction::BlockPrologue(block_metadata)) => {
-                    execute_block_trace_guard.clear();
-                    current_block_id = block_metadata.id();
-                    trace_code_block!("diem_vm::execute_block_impl", {"block", current_block_id}, execute_block_trace_guard);
-                    let (vm_status, output) =
-                        self.process_block_prologue(data_cache, block_metadata, &log_context)?;
-                    (vm_status, output, Some("block_prologue".to_string()))
-                }
-                Ok(PreprocessedTransaction::WaypointWriteSet(write_set_payload)) => {
-                    let (vm_status, output) = self.process_waypoint_change_set(
-                        data_cache,
-                        write_set_payload,
-                        &log_context,
-                    )?;
-                    (vm_status, output, Some("waypoint_write_set".to_string()))
-                }
-                Ok(PreprocessedTransaction::UserTransaction(txn)) => {
-                    let sender = txn.sender().to_string();
-                    let _timer = TXN_TOTAL_SECONDS.start_timer();
-                    let (vm_status, output) =
-                        self.execute_user_transaction(data_cache, &txn, &log_context);
-
-                    // Increment the counter for user transactions executed.
-                    let counter_label = match output.status() {
-                        TransactionStatus::Keep(_) => Some("success"),
-                        TransactionStatus::Discard(_) => Some("discarded"),
-                        TransactionStatus::Retry => None,
-                    };
-                    if let Some(label) = counter_label {
-                        USER_TRANSACTIONS_EXECUTED.with_label_values(&[label]).inc();
-                    }
-                    (vm_status, output, Some(sender))
-                }
-                Ok(PreprocessedTransaction::WriteSet(txn)) => {
-                    let (vm_status, output) =
-                        self.process_writeset_transaction(data_cache, *txn, &log_context)?;
-                    (vm_status, output, Some("write_set".to_string()))
-                }
-                Err(e) => {
-                    let (vm_status, output) = discard_error_vm_status(e);
-                    (vm_status, output, None)
-                }
-            };
+            let (vm_status, output, sender) = self.execute_single_txn(data_cache, &txn, &log_context)?;
             if !output.status().is_discarded() {
                 data_cache.push_write_set(output.write_set());
             } else {

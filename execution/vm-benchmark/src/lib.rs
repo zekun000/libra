@@ -30,6 +30,15 @@ use transaction_builder::{
     encode_create_parent_vasp_account_script, encode_peer_to_peer_with_metadata_script,
 };
 
+use diem_vm::VMExecutor;
+use std::collections::HashMap;
+use diem_types::{
+    access_path::AccessPath,
+    transaction::TransactionOutput,
+    write_set::{WriteOp, },
+};
+use diem_state_view::{StateView, };
+
 struct AccountData {
     private_key: Ed25519PrivateKey,
     public_key: Ed25519PublicKey,
@@ -262,15 +271,6 @@ pub fn run_benchmark(
     // generator.verify_sequence_number(db.as_ref());
 
 }
-
-use diem_vm::VMExecutor;
-use std::collections::HashMap;
-use diem_types::{
-    access_path::AccessPath,
-    transaction::TransactionOutput,
-    write_set::{WriteOp, },
-};
-use diem_state_view::{StateView, };
 
 pub struct DictDB {
     pub db : HashMap<AccessPath, Vec<u8>>,
