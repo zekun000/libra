@@ -50,6 +50,7 @@ members = [
     "execution/db-bootstrapper",
     "execution/execution-correctness",
     "execution/executor",
+    "execution/vm-benchmark",
     "execution/executor-benchmark",
     "execution/executor-test-helpers",
     "execution/executor-types",

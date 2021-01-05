@@ -7460,6 +7460,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "vm-benchmark"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "diem-config",
+ "diem-crypto",
+ "diem-genesis-tool",
+ "diem-infallible",
+ "diem-logger",
+ "diem-state-view",
+ "diem-types",
+ "diem-vm",
+ "diem-workspace-hack",
+ "diemdb",
+ "executor",
+ "executor-types",
+ "itertools 0.9.0",
+ "rand 0.7.3",
+ "rayon",
+ "storage-client",
+ "storage-interface",
+ "storage-service",
+ "structopt 0.3.21",
+ "transaction-builder",
+]
+
+[[package]]
 name = "vm-genesis"
 version = "0.1.0"
 dependencies = [
