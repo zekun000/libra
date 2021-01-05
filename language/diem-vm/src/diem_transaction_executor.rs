@@ -45,6 +45,9 @@ use std::{
     convert::{AsMut, AsRef},
 };
 
+use std::collections::HashMap;
+
+#[derive(Clone)]
 pub struct DiemVM(DiemVMImpl);
 
 impl DiemVM {
@@ -574,8 +577,8 @@ impl DiemVM {
     }
 
 
-    fn execute_single_txn(&mut
-            self,
+    fn execute_single_txn(
+            &mut self,
             data_cache: &mut StateViewCache,
             txn : &Result<PreprocessedTransaction, VMStatus>,
             log_context : &impl LogContext,
@@ -644,6 +647,7 @@ impl DiemVM {
             transactions.len()
         );
 
+        let num_txns = transactions.len();
         let signature_verified_block: Vec<Result<PreprocessedTransaction, VMStatus>>;
         {
             // Verify the signatures of all the transactions in parallel.
@@ -653,6 +657,36 @@ impl DiemVM {
                 .into_par_iter()
                 .map(preprocess_transaction)
                 .collect();
+        }
+
+
+        let xref = &*data_cache;
+        let execute_start = std::time::Instant::now();
+        let mut inner_results = Vec::new();
+        inner_results = signature_verified_block.par_iter().enumerate().map(|(idx, txn)| {
+            let mut state_view_cache = StateViewCache::new(xref);
+            let mut vm = self.clone();
+            let log_context = AdapterLogSchema::new(state_view_cache.id(), idx);
+            vm.execute_single_txn(&mut state_view_cache, txn, &log_context)
+        }).collect();
+        let execute_time = std::time::Instant::now().duration_since(execute_start);
+        info!(
+            "Parallel: XX. execute time: {} ms. commit time: XX ms. TPS: {}.",
+            execute_time.as_millis(),
+            num_txns as u128 * 1_000_000_000 / execute_time.as_nanos(),
+        );
+
+        let mut hist = HashMap::new();
+        for res in inner_results {
+            match res {
+                Ok((vm_status, output, sender)) => {
+                    for (ref ap, ref write_op) in output.write_set() {
+                        *hist.entry(ap.clone()).or_insert(0) += 1;
+                    }
+                },
+                Err(e) => {
+                    return Err(e);
+                } }
         }
 
         for (idx, txn) in signature_verified_block.into_iter().enumerate() {

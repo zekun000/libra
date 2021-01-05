@@ -22,6 +22,7 @@ use move_vm_runtime::data_cache::RemoteCache;
 use std::collections::btree_map::BTreeMap;
 use vm::errors::*;
 
+
 /// A local cache for a given a `StateView`. The cache is private to the Diem layer
 /// but can be used as a one shot cache for systems that need a simple `RemoteCache`
 /// implementation (e.g. tests or benchmarks).
@@ -36,9 +37,11 @@ use vm::errors::*;
 /// If a system wishes to execute a block of transaction on a given view, a cache that keeps
 /// track of incremental changes is vital to the consistency of the data store and the system.
 pub struct StateViewCache<'a> {
-    data_view: &'a dyn StateView,
+    pub data_view: &'a dyn StateView,
     data_map: BTreeMap<AccessPath, Option<Vec<u8>>>,
 }
+
+unsafe impl<'a> Sync for StateViewCache<'a> {}
 
 impl<'a> StateViewCache<'a> {
     /// Create a `StateViewCache` give a `StateView`. Hold updates to the data store and
