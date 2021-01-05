@@ -45,6 +45,7 @@ use std::{
     convert::{AsMut, AsRef},
 };
 
+use std::cmp::max;
 use std::collections::HashMap;
 
 #[derive(Clone)]
@@ -648,7 +649,7 @@ impl DiemVM {
         );
 
         let num_txns = transactions.len();
-        let signature_verified_block: Vec<Result<PreprocessedTransaction, VMStatus>>;
+        let mut signature_verified_block: Vec<Result<PreprocessedTransaction, VMStatus>>;
         {
             // Verify the signatures of all the transactions in parallel.
             // This is time consuming so don't wait and do the checking
@@ -659,76 +660,101 @@ impl DiemVM {
                 .collect();
         }
 
+        let parallel = true;
+        if parallel {
 
-        let xref = &*data_cache;
-        let execute_start = std::time::Instant::now();
-        let mut inner_results = Vec::new();
-        inner_results = signature_verified_block.par_iter().enumerate().map(|(idx, txn)| {
-            let mut state_view_cache = StateViewCache::new(xref);
-            let mut vm = self.clone();
-            let log_context = AdapterLogSchema::new(state_view_cache.id(), idx);
-            vm.execute_single_txn(&mut state_view_cache, txn, &log_context)
-        }).collect();
-        let execute_time = std::time::Instant::now().duration_since(execute_start);
-        info!(
-            "Parallel: XX. execute time: {} ms. commit time: XX ms. TPS: {}.",
-            execute_time.as_millis(),
-            num_txns as u128 * 1_000_000_000 / execute_time.as_nanos(),
-        );
+            while signature_verified_block.len() != 0 {
+                let xref = &*data_cache;
+                let mut inner_results = Vec::new();
+                inner_results = signature_verified_block.par_iter().enumerate().map(|(idx, txn)| {
+                    let mut state_view_cache = StateViewCache::new(xref);
+                    let mut vm = self.clone();
+                    let log_context = AdapterLogSchema::new(state_view_cache.id(), idx);
+                    vm.execute_single_txn(&mut state_view_cache, txn, &log_context)
+                }).collect();
 
-        let mut hist = HashMap::new();
-        for res in inner_results {
-            match res {
-                Ok((vm_status, output, sender)) => {
-                    for (ref ap, ref write_op) in output.write_set() {
-                        *hist.entry(ap.clone()).or_insert(0) += 1;
+                let mut hist = HashMap::new();
+                let mut remaining_txs = Vec::with_capacity(signature_verified_block.len());
+                for (res, txn) in inner_results.into_iter().zip(signature_verified_block.into_iter()) {
+                    match res {
+                        Ok((vm_status, output, sender)) => {
+                            if !output.status().is_discarded() {
+                                // Make a historgram of paths, and how many times they are written to.
+                                // If a transaction is the first to write (hist[path] = 1) to paths
+                                // in its write set, then it can proceed to write to the data cache.
+                                // If not (eg. hist[path] > 0), then it must be re-computed.
+                                let mut dep_max = 0;
+                                for (ap, _) in output.write_set() {
+                                    *hist.entry(ap.clone()).or_insert(0) += 1;
+                                    dep_max = max(hist[ap], dep_max);
+                                }
+
+                                if dep_max == 1 {
+                                    // Commit the results
+                                    data_cache.push_write_set(output.write_set());
+                                    result.push((vm_status, output))
+                                }
+                                else {
+                                    // Write variable already set, try again:
+                                    remaining_txs.push(txn);
+                                }
+                            }
+                            else {
+                                result.push((vm_status, output));
+                            }
+                        },
+                        Err(e) => {
+                            return Err(e);
+                        }
                     }
-                },
-                Err(e) => {
-                    return Err(e);
-                } }
-        }
-
-        for (idx, txn) in signature_verified_block.into_iter().enumerate() {
-            let log_context = AdapterLogSchema::new(data_cache.id(), idx);
-            if should_restart {
-                let txn_output = TransactionOutput::new(
-                    WriteSet::default(),
-                    vec![],
-                    0,
-                    TransactionStatus::Retry,
-                );
-                result.push((VMStatus::Error(StatusCode::UNKNOWN_STATUS), txn_output));
-                debug!(log_context, "Retry after reconfiguration");
-                continue;
-            };
-            let (vm_status, output, sender) = self.execute_single_txn(data_cache, &txn, &log_context)?;
-            if !output.status().is_discarded() {
-                data_cache.push_write_set(output.write_set());
-            } else {
-                match sender {
-                    Some(s) => trace!(
-                        log_context,
-                        "Transaction discarded, sender: {}, error: {:?}",
-                        s,
-                        vm_status,
-                    ),
-                    None => trace!(log_context, "Transaction malformed, error: {:?}", vm_status,),
                 }
+                signature_verified_block = remaining_txs;
             }
 
-            if is_reconfiguration(&output) {
-                info!(
-                    AdapterLogSchema::new(data_cache.id(), 0),
-                    "Reconfiguration occurred: restart required",
-                );
-                should_restart = true;
+        } else {
+
+            for (idx, txn) in signature_verified_block.into_iter().enumerate() {
+                let log_context = AdapterLogSchema::new(data_cache.id(), idx);
+                if should_restart {
+                    let txn_output = TransactionOutput::new(
+                        WriteSet::default(),
+                        vec![],
+                        0,
+                        TransactionStatus::Retry,
+                    );
+                    result.push((VMStatus::Error(StatusCode::UNKNOWN_STATUS), txn_output));
+                    debug!(log_context, "Retry after reconfiguration");
+                    continue;
+                };
+                let (vm_status, output, sender) = self.execute_single_txn(data_cache, &txn, &log_context)?;
+                if !output.status().is_discarded() {
+                    data_cache.push_write_set(output.write_set());
+                } else {
+                    match sender {
+                        Some(s) => trace!(
+                            log_context,
+                            "Transaction discarded, sender: {}, error: {:?}",
+                            s,
+                            vm_status,
+                        ),
+                        None => trace!(log_context, "Transaction malformed, error: {:?}", vm_status,),
+                    }
+                }
+
+                if is_reconfiguration(&output) {
+                    info!(
+                        AdapterLogSchema::new(data_cache.id(), 0),
+                        "Reconfiguration occurred: restart required",
+                    );
+                    should_restart = true;
+                }
+
+                // `result` is initially empty, a single element is pushed per loop iteration and
+                // the number of iterations is bound to the max size of `signature_verified_block`
+                assume!(result.len() < usize::max_value());
+                result.push((vm_status, output))
             }
 
-            // `result` is initially empty, a single element is pushed per loop iteration and
-            // the number of iterations is bound to the max size of `signature_verified_block`
-            assume!(result.len() < usize::max_value());
-            result.push((vm_status, output))
         }
 
         // Record the histogram count for transactions per block.

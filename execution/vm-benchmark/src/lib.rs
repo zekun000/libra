@@ -1,7 +1,7 @@
 // Copyright (c) The diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use diem_config::{utils::get_genesis_txn, };
+use diem_config::utils::get_genesis_txn;
 use diem_crypto::{
     ed25519::{Ed25519PrivateKey, Ed25519PublicKey},
     PrivateKey, SigningKey, Uniform,
@@ -10,8 +10,7 @@ use diem_logger::prelude::*;
 use diem_types::{
     account_address::AccountAddress,
     account_config::{
-        xus_tag, testnet_dd_account_address, treasury_compliance_account_address,
-        XUS_NAME,
+        testnet_dd_account_address, treasury_compliance_account_address, xus_tag, XUS_NAME,
     },
     chain_id::ChainId,
     transaction::{
@@ -21,23 +20,16 @@ use diem_types::{
 use diem_vm::DiemVM;
 
 use rand::{rngs::StdRng, SeedableRng};
-use std::{
-    path::PathBuf,
-    sync::{mpsc, },
-};
+use std::{path::PathBuf, sync::mpsc};
 
 use transaction_builder::{
     encode_create_parent_vasp_account_script, encode_peer_to_peer_with_metadata_script,
 };
 
+use diem_state_view::StateView;
+use diem_types::{access_path::AccessPath, transaction::TransactionOutput, write_set::WriteOp};
 use diem_vm::VMExecutor;
 use std::collections::HashMap;
-use diem_types::{
-    access_path::AccessPath,
-    transaction::TransactionOutput,
-    write_set::{WriteOp, },
-};
-use diem_state_view::{StateView, };
 
 struct AccountData {
     private_key: Ed25519PrivateKey,
@@ -225,7 +217,9 @@ pub fn run_benchmark(
 
     let mut state_view = DictDB::new();
     let genesis_transaction = get_genesis_txn(&config).unwrap();
-    let result = DiemVM::execute_block(vec![genesis_transaction.clone()], &state_view).map_err(anyhow::Error::from).unwrap();
+    let result = DiemVM::execute_block(vec![genesis_transaction.clone()], &state_view)
+        .map_err(anyhow::Error::from)
+        .unwrap();
     state_view.update(result);
 
     // Spawn two threads to run transaction generator and executor separately.
@@ -238,14 +232,15 @@ pub fn run_benchmark(
         })
         .expect("Failed to spawn transaction generator thread.");
 
-
     let exe_thread = std::thread::Builder::new()
         .name("txn_executor".to_string())
         .spawn(move || {
             while let Ok(transactions) = block_receiver.recv() {
                 let num_txns = transactions.len();
                 let execute_start = std::time::Instant::now();
-                let result = DiemVM::execute_block(transactions, &state_view).map_err(anyhow::Error::from).unwrap();
+                let result = DiemVM::execute_block(transactions, &state_view)
+                    .map_err(anyhow::Error::from)
+                    .unwrap();
                 let execute_time = std::time::Instant::now().duration_since(execute_start);
 
                 info!(
@@ -253,7 +248,6 @@ pub fn run_benchmark(
                     execute_time.as_millis(),
                     num_txns as u128 * 1_000_000_000 / execute_time.as_nanos(),
                 );
-
 
                 state_view.update(result);
             }
@@ -269,30 +263,28 @@ pub fn run_benchmark(
 
     // Do a sanity check on the sequence number to make sure all transactions are committed.
     // generator.verify_sequence_number(db.as_ref());
-
 }
 
 pub struct DictDB {
-    pub db : HashMap<AccessPath, Vec<u8>>,
-    pub boot : bool,
+    pub db: HashMap<AccessPath, Vec<u8>>,
+    pub boot: bool,
 }
 
 impl DictDB {
-
     pub fn new() -> DictDB {
         DictDB {
-            db : HashMap::new(),
-            boot : true,
+            db: HashMap::new(),
+            boot: true,
         }
     }
 
-    pub fn update(&mut self, tx_output : Vec<TransactionOutput>) {
-        for output in tx_output{
+    pub fn update(&mut self, tx_output: Vec<TransactionOutput>) {
+        for output in tx_output {
             for (path, action) in output.write_set() {
                 match action {
                     WriteOp::Deletion => {
                         self.db.remove(path);
-                    },
+                    }
                     WriteOp::Value(v) => {
                         self.db.insert(path.clone(), v.clone());
                     }
@@ -303,28 +295,28 @@ impl DictDB {
 }
 
 impl StateView for DictDB {
-        /// Gets the state for a single access path.
-        fn get(&self, access_path: &AccessPath) -> anyhow::Result<Option<Vec<u8>>>{
-            match self.db.get(access_path) {
-                None => Ok(None),
-                Some(x) => Ok(Some(x.clone())),
-            }
+    /// Gets the state for a single access path.
+    fn get(&self, access_path: &AccessPath) -> anyhow::Result<Option<Vec<u8>>> {
+        match self.db.get(access_path) {
+            None => Ok(None),
+            Some(x) => Ok(Some(x.clone())),
         }
+    }
 
-        /// Gets states for a list of access paths.
-        fn multi_get(&self, access_paths: &[AccessPath]) -> anyhow::Result<Vec<Option<Vec<u8>>>>{
-            let mut results = Vec::new();
-            for path in access_paths {
-                results.push(self.get(path).unwrap());
-            }
-            return Ok(results);
+    /// Gets states for a list of access paths.
+    fn multi_get(&self, access_paths: &[AccessPath]) -> anyhow::Result<Vec<Option<Vec<u8>>>> {
+        let mut results = Vec::new();
+        for path in access_paths {
+            results.push(self.get(path).unwrap());
         }
+        return Ok(results);
+    }
 
-        /// VM needs this method to know whether the current state view is for genesis state creation.
-        /// Currently TransactionPayload::WriteSet is only valid for genesis state creation.
-        fn is_genesis(&self) -> bool{
-            self.boot
-        }
+    /// VM needs this method to know whether the current state view is for genesis state creation.
+    /// Currently TransactionPayload::WriteSet is only valid for genesis state creation.
+    fn is_genesis(&self) -> bool {
+        self.boot
+    }
 }
 
 fn create_transaction(
@@ -341,8 +333,8 @@ fn create_transaction(
         sender,
         sequence_number,
         program,
-        1_000_000,             /* max_gas_amount */
-        0,                     /* gas_unit_price */
+        1_000_000,           /* max_gas_amount */
+        0,                   /* gas_unit_price */
         XUS_NAME.to_owned(), /* gas_currency_code */
         expiration_time,
         ChainId::test(),
