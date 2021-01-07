@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    loader::{Function, Loader, Resolver},
+    loader::{Function, Loader, Resolver, ResolverToken},
     logging::LogContext,
     native_functions::FunctionContext,
     trace,
@@ -22,12 +22,14 @@ use move_vm_types::{
         self, GlobalValue, IntegerValue, Locals, Reference, Struct, StructRef, VMValueCast, Value,
     },
 };
-use std::{cmp::min, collections::VecDeque, fmt::Write, sync::Arc};
+use std::{cmp::min, collections::VecDeque, fmt::Write, };
 use vm::{
     errors::*,
     file_format::{Bytecode, FunctionHandleIndex, FunctionInstantiationIndex, Signature},
     file_format_common::Opcodes,
 };
+
+use std::rc::Rc;
 
 macro_rules! debug_write {
     ($($toks: tt)*) => {
@@ -71,7 +73,7 @@ impl<L: LogContext> Interpreter<L> {
     /// Entrypoint into the interpreter. All external calls need to be routed through this
     /// function.
     pub(crate) fn entrypoint(
-        function: Arc<Function>,
+        function: Rc<Function>,
         ty_args: Vec<Type>,
         args: Vec<Value>,
         data_store: &mut impl DataStore,
@@ -101,7 +103,7 @@ impl<L: LogContext> Interpreter<L> {
         loader: &Loader,
         data_store: &mut impl DataStore,
         cost_strategy: &mut CostStrategy,
-        function: Arc<Function>,
+        function: Rc<Function>,
         ty_args: Vec<Type>,
         args: Vec<Value>,
     ) -> VMResult<()> {
@@ -123,7 +125,7 @@ impl<L: LogContext> Interpreter<L> {
         loader: &Loader,
         data_store: &mut impl DataStore,
         cost_strategy: &mut CostStrategy,
-        function: Arc<Function>,
+        function: Rc<Function>,
         ty_args: Vec<Type>,
         args: Vec<Value>,
     ) -> VMResult<()> {
@@ -143,6 +145,7 @@ impl<L: LogContext> Interpreter<L> {
                     .execute_code(&resolver, self, data_store, cost_strategy)
                     .map_err(|err| self.maybe_core_dump(err, &current_frame))?;
             match exit_code {
+                // ---------------------------------
                 ExitCode::Return => {
                     current_frame
                         .locals
@@ -155,6 +158,7 @@ impl<L: LogContext> Interpreter<L> {
                         return Ok(());
                     }
                 }
+                // ---------------------------------
                 ExitCode::Call(fh_idx) => {
                     cost_strategy
                         .charge_instr_with_size(
@@ -184,6 +188,7 @@ impl<L: LogContext> Interpreter<L> {
                     })?;
                     current_frame = frame;
                 }
+                // ---------------------------------
                 ExitCode::CallGeneric(idx) => {
                     resolver
                         .type_params_count(idx)
@@ -228,7 +233,7 @@ impl<L: LogContext> Interpreter<L> {
     ///
     /// Native functions do not push a frame at the moment and as such errors from a native
     /// function are incorrectly attributed to the caller.
-    fn make_call_frame(&mut self, func: Arc<Function>, ty_args: Vec<Type>) -> VMResult<Frame> {
+    fn make_call_frame(&mut self, func: Rc<Function>, ty_args: Vec<Type>) -> VMResult<Frame> {
         let mut locals = Locals::new(func.local_count());
         let arg_count = func.arg_count();
         for i in 0..arg_count {
@@ -248,7 +253,7 @@ impl<L: LogContext> Interpreter<L> {
         resolver: &Resolver,
         data_store: &mut dyn DataStore,
         cost_strategy: &mut CostStrategy,
-        function: Arc<Function>,
+        function: Rc<Function>,
         ty_args: Vec<Type>,
     ) -> VMResult<()> {
         // Note: refactor if native functions push a frame on the stack
@@ -276,7 +281,7 @@ impl<L: LogContext> Interpreter<L> {
         resolver: &Resolver,
         data_store: &mut dyn DataStore,
         cost_strategy: &mut CostStrategy,
-        function: Arc<Function>,
+        function: Rc<Function>,
         ty_args: Vec<Type>,
     ) -> PartialVMResult<()> {
         let mut arguments = VecDeque::new();
@@ -661,8 +666,9 @@ impl CallStack {
 struct Frame {
     pc: u16,
     locals: Locals,
-    function: Arc<Function>,
+    function: Rc<Function>,
     ty_args: Vec<Type>,
+    resolver_token : Option<ResolverToken>
 }
 
 /// An `ExitCode` from `execute_code_unit`.
@@ -677,12 +683,13 @@ impl Frame {
     /// Create a new `Frame` given a `Function` and the function `Locals`.
     ///
     /// The locals must be loaded before calling this.
-    fn new(function: Arc<Function>, ty_args: Vec<Type>, locals: Locals) -> Self {
+    fn new(function: Rc<Function>, ty_args: Vec<Type>, locals: Locals) -> Self {
         Frame {
             pc: 0,
             locals,
             function,
             ty_args,
+            resolver_token : None,
         }
     }
 
@@ -1147,8 +1154,14 @@ impl Frame {
         &self.ty_args
     }
 
-    fn resolver<'a>(&self, loader: &'a Loader) -> Resolver<'a> {
-        self.function.get_resolver(loader)
+    fn resolver<'a>(&mut self, loader: &'a Loader) -> Resolver<'a> {
+        // Confirmed this optimization actually helps.
+        if self.resolver_token.is_none() {
+            self.resolver_token = Some(self.function.get_resolver_token(loader));
+        }
+
+        self.function.get_resolver_from_token(self.resolver_token.clone().unwrap(), loader)
+        // self.function.get_resolver(loader)
     }
 
     fn location(&self) -> Location {

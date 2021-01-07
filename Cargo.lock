@@ -2275,6 +2275,7 @@ dependencies = [
  "move-core-types",
  "move-vm-runtime",
  "move-vm-types",
+ "num_cpus",
  "once_cell",
  "proptest",
  "rayon",
@@ -4366,6 +4367,7 @@ dependencies = [
  "move-vm-natives",
  "move-vm-types",
  "once_cell",
+ "parking_lot",
  "proptest",
  "vm",
 ]
@@ -6605,6 +6607,7 @@ dependencies = [
  "diem-workspace-hack",
  "itertools 0.10.0",
  "move-core-types",
+ "parking_lot",
  "scratchpad",
  "serde",
  "thiserror",

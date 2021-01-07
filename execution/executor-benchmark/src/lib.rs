@@ -319,9 +319,10 @@ fn create_storage_service_and_executor(
     let waypoint = generate_waypoint::<DiemVM>(&db_rw, get_genesis_txn(config).unwrap()).unwrap();
     maybe_bootstrap::<DiemVM>(&db_rw, get_genesis_txn(config).unwrap(), waypoint).unwrap();
 
-    let _handle = start_storage_service_with_db(config, db.clone());
+    // let _handle = start_storage_service_with_db(config, db.clone());
     let executor = Executor::new(
-        StorageClient::new(&config.storage.address, config.storage.timeout_ms).into(),
+        db_rw
+        // StorageClient::new(&config.storage.address, config.storage.timeout_ms).into(),
     );
 
     (db, executor)
@@ -340,9 +341,6 @@ pub fn run_benchmark(
         config.storage.dir = path;
     }
 
-    let (db, executor) = create_storage_service_and_executor(&config);
-    let parent_block_id = executor.committed_block_id();
-
     let (block_sender, block_receiver) = mpsc::sync_channel(50 /* bound */);
 
     // Spawn two threads to run transaction generator and executor separately.
@@ -357,8 +355,11 @@ pub fn run_benchmark(
     let exe_thread = std::thread::Builder::new()
         .name("txn_executor".to_string())
         .spawn(move || {
+            let (db, executor) = create_storage_service_and_executor(&config);
+            let parent_block_id = executor.committed_block_id();
             let mut exe = TransactionExecutor::new(executor, parent_block_id, block_receiver);
             exe.run();
+            db
         })
         .expect("Failed to spawn transaction executor thread.");
 
@@ -367,10 +368,11 @@ pub fn run_benchmark(
     // Drop the sender so the executor thread can eventually exit.
     generator.drop_sender();
     // Wait until all transactions are committed.
-    exe_thread.join().unwrap();
-
+    let db = exe_thread.join().unwrap();
     // Do a sanity check on the sequence number to make sure all transactions are committed.
     generator.verify_sequence_number(db.as_ref());
+
+
 }
 
 fn create_transaction(

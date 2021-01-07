@@ -112,6 +112,7 @@ pub mod foreign_contracts;
 
 mod diem_vm;
 mod errors;
+mod scheduler_parallel;
 pub mod transaction_metadata;
 
 pub mod diem_transaction_executor;
@@ -132,7 +133,7 @@ use diem_types::{
 };
 use move_core_types::{
     account_address::AccountAddress,
-    language_storage::{ResourceKey, StructTag},
+    language_storage::{StructTag, },
 };
 
 /// This trait describes the VM's validation interfaces.
@@ -146,7 +147,7 @@ pub trait VMValidator {
 }
 
 /// This trait describes the VM's execution interface.
-pub trait VMExecutor: Send {
+pub trait VMExecutor { // }: Send {
     // NOTE: At the moment there are no persistent caches that live past the end of a block (that's
     // why execute_block doesn't take &self.)
     // There are some cache invalidation issues around transactions publishing code that need to be
@@ -160,7 +161,6 @@ pub trait VMExecutor: Send {
 }
 
 /// Get the AccessPath to a resource stored under `address` with type name `tag`
-fn create_access_path(address: AccountAddress, tag: StructTag) -> AccessPath {
-    let resource_tag = ResourceKey::new(address, tag);
-    AccessPath::resource_access_path(resource_tag)
+fn create_access_path(address: AccountAddress, tag: &StructTag) -> AccessPath {
+    AccessPath::resource_access_path(address, tag)
 }

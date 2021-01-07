@@ -106,7 +106,7 @@ impl VMValidator for DiemVMValidator {
 }
 
 fn get_account_role(sender: AccountAddress, remote_cache: &StateViewCache) -> GovernanceRole {
-    let role_access_path = create_access_path(sender, RoleId::struct_tag());
+    let role_access_path = create_access_path(sender, &RoleId::struct_tag());
     if let Ok(Some(blob)) = remote_cache.get(&role_access_path) {
         return bcs::from_bytes::<account_config::RoleId>(&blob)
             .map(|role_id| GovernanceRole::from_role_id(role_id.role_id()))
@@ -115,10 +115,10 @@ fn get_account_role(sender: AccountAddress, remote_cache: &StateViewCache) -> Go
     GovernanceRole::NonGovernanceRole
 }
 
-pub(crate) fn validate_signature_checked_transaction(
+pub(crate) fn validate_signature_checked_transaction<R : StateView + RemoteCache>(
     vm: &DiemVMImpl,
     transaction: &SignatureCheckedTransaction,
-    remote_cache: &StateViewCache<'_>,
+    remote_cache: &R,
     allow_too_new: bool,
 ) -> Result<(u64, Identifier), VMStatus> {
     let gas_price = transaction.gas_unit_price();
@@ -130,7 +130,7 @@ pub(crate) fn validate_signature_checked_transaction(
         }
     };
 
-    let normalized_gas_price = match get_currency_info(&currency_code, &remote_cache) {
+    let normalized_gas_price = match get_currency_info(&currency_code, remote_cache) {
         Ok(info) => info.convert_to_xdx(gas_price),
         Err(err) => {
             return Err(err);
@@ -178,9 +178,11 @@ pub(crate) fn validate_signature_checked_transaction(
     Ok((normalized_gas_price, currency_code))
 }
 
-fn get_currency_info(
+use move_vm_runtime::{data_cache::RemoteCache, };
+
+fn get_currency_info<S: StateView>(
     currency_code: &IdentStr,
-    remote_cache: &StateViewCache,
+    remote_cache: &S,
 ) -> Result<CurrencyInfoResource, VMStatus> {
     let currency_info_path = CurrencyInfoResource::resource_path_for(currency_code.to_owned());
     if let Ok(Some(blob)) = remote_cache.get(&currency_info_path) {

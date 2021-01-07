@@ -8,7 +8,7 @@ use bytecode_verifier::{
     RecursiveStructDefChecker, ResourceTransitiveChecker, SignatureChecker,
 };
 use diem_crypto::HashValue;
-use diem_infallible::Mutex;
+
 use diem_logger::prelude::*;
 use move_core_types::{
     identifier::{IdentStr, Identifier},
@@ -20,7 +20,7 @@ use move_vm_types::{
     data_store::DataStore,
     loaded_data::runtime_types::{StructType, Type},
 };
-use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
+use std::{collections::HashMap, fmt::Debug, hash::Hash, };
 use vm::{
     access::{ModuleAccess, ScriptAccess},
     errors::{verification_error, Location, PartialVMError, PartialVMResult, VMError, VMResult},
@@ -33,14 +33,15 @@ use vm::{
     IndexKind,
 };
 
-use std::sync::RwLock;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 // A simple cache that offers both a HashMap and a Vector lookup.
 // Values are forced into a `Arc` so they can be used from multiple thread.
 // Access to this cache is always under a `Mutex`.
 struct BinaryCache<K, V> {
     id_map: HashMap<K, usize>,
-    binaries: Vec<Arc<V>>,
+    binaries: Vec<Rc<V>>,
 }
 
 impl<K, V> BinaryCache<K, V>
@@ -54,8 +55,8 @@ where
         }
     }
 
-    fn insert(&mut self, key: K, binary: V) -> &Arc<V> {
-        self.binaries.push(Arc::new(binary));
+    fn insert(&mut self, key: K, binary: V) -> &Rc<V> {
+        self.binaries.push(Rc::new(binary));
         let idx = self.binaries.len() - 1;
         self.id_map.insert(key, idx);
         self.binaries
@@ -63,11 +64,17 @@ where
             .expect("BinaryCache: last() after push() impossible failure")
     }
 
-    fn get(&self, key: &K) -> Option<&Arc<V>> {
+    fn get(&self, key: &K) -> Option<&Rc<V>> {
         self.id_map
             .get(&key)
             .and_then(|idx| self.binaries.get(*idx))
     }
+
+    /*
+    fn len(&self) -> usize {
+        self.binaries.len()
+    }
+    */
 }
 
 // A script cache is a map from the hash value of a script and the `Script` itself.
@@ -84,11 +91,11 @@ impl ScriptCache {
         }
     }
 
-    fn get(&self, hash: &HashValue) -> Option<Arc<Function>> {
+    fn get(&self, hash: &HashValue) -> Option<Rc<Function>> {
         self.scripts.get(hash).map(|script| script.entry_point())
     }
 
-    fn insert(&mut self, hash: HashValue, script: Script) -> PartialVMResult<Arc<Function>> {
+    fn insert(&mut self, hash: HashValue, script: Script) -> PartialVMResult<Rc<Function>> {
         match self.get(&hash) {
             Some(script) => Ok(script),
             None => Ok(self.scripts.insert(hash, script).entry_point()),
@@ -100,18 +107,29 @@ impl ScriptCache {
 // It holds all Modules, Types and Functions loaded.
 // Types and Functions are pushed globally to the ModuleCache.
 // All accesses to the ModuleCache are under lock (exclusive).
-pub struct ModuleCache {
+
+struct ModuleCache {
     modules: BinaryCache<ModuleId, Module>,
-    structs: Vec<Arc<StructType>>,
-    functions: Vec<Arc<Function>>,
+    structs: Vec<Rc<StructType>>,
+    functions: Vec<Rc<Function>>,
 }
+/*
+pub struct ModuleCache {
+    pub inner : RwLock<ModuleCacheInner>,
+
+    pub flag : AtomicUsize,
+    pub read_functions : Arc<Vec<Arc<Function>>>,
+}
+*/
 
 impl ModuleCache {
     fn new() -> Self {
         Self {
-            modules: BinaryCache::new(),
-            structs: vec![],
-            functions: vec![],
+
+                modules: BinaryCache::new(),
+                structs: vec![],
+                functions: vec![],
+
         }
     }
 
@@ -119,20 +137,26 @@ impl ModuleCache {
     // Common "get" operations
     //
 
+    /*
+    fn clone_functions(&self) -> Vec<Rc<Function>> {
+        self.functions.clone()
+    }
+    */
+
     // Retrieve a module by `ModuleId`. The module may have not been loaded yet in which
     // case `None` is returned
-    fn module_at(&self, id: &ModuleId) -> Option<Arc<Module>> {
-        self.modules.get(id).map(|module| Arc::clone(module))
+    fn module_at(&self, id: &ModuleId) -> Option<Rc<Module>> {
+        self.modules.get(id).map(|module| Rc::clone(module))
     }
 
     // Retrieve a function by index
-    fn function_at(&self, idx: usize) -> Arc<Function> {
-        Arc::clone(&self.functions[idx])
+    fn function_at(&self, idx: usize) -> Rc<Function> {
+        Rc::clone(&self.functions[idx])
     }
 
     // Retrieve a struct by index
-    fn struct_at(&self, idx: usize) -> Arc<StructType> {
-        Arc::clone(&self.structs[idx])
+    fn struct_at(&self, idx: usize) -> Rc<StructType> {
+        Rc::clone(&self.structs[idx])
     }
 
     //
@@ -145,7 +169,7 @@ impl ModuleCache {
         id: ModuleId,
         module: CompiledModule,
         log_context: &impl LogContext,
-    ) -> VMResult<Arc<Module>> {
+    ) -> VMResult<Rc<Module>> {
         if let Some(module) = self.module_at(&id) {
             return Ok(module);
         }
@@ -154,7 +178,7 @@ impl ModuleCache {
         // leave a clean state
         self.add_module(&module, log_context)?;
         match Module::new(module, self) {
-            Ok(module) => Ok(Arc::clone(self.modules.insert(id, module))),
+            Ok(module) => Ok(Rc::clone(self.modules.insert(id, module))),
             Err((err, module)) => {
                 // remove all structs and functions that have been pushed
                 let strut_def_count = module.struct_defs().len();
@@ -175,7 +199,7 @@ impl ModuleCache {
         let starting_idx = self.structs.len();
         for (idx, struct_def) in module.struct_defs().iter().enumerate() {
             let st = self.make_struct_type(module, struct_def, StructDefinitionIndex(idx as u16));
-            self.structs.push(Arc::new(st));
+            self.structs.push(Rc::new(st));
         }
         self.load_field_types(module, starting_idx, log_context)
             .map_err(|err| {
@@ -186,7 +210,7 @@ impl ModuleCache {
         for (idx, func) in module.function_defs().iter().enumerate() {
             let findex = FunctionDefinitionIndex(idx as TableIndex);
             let function = Function::new(findex, func, module);
-            self.functions.push(Arc::new(function));
+            self.functions.push(Rc::new(function));
         }
         Ok(())
     }
@@ -236,7 +260,7 @@ impl ModuleCache {
         }
         let mut struct_idx = starting_idx;
         for fields in field_types {
-            match Arc::get_mut(&mut self.structs[struct_idx]) {
+            match Rc::get_mut(&mut self.structs[struct_idx]) {
                 Some(struct_type) => struct_type.fields = fields,
                 None => {
                     // we have pending references to the `Arc` which is impossible,
@@ -247,11 +271,11 @@ impl ModuleCache {
                     log_context.alert();
                     error!(
                         *log_context,
-                        "Arc<StructType> cannot have any live reference while publishing"
+                        "Rc<StructType> cannot have any live reference while publishing"
                     );
                     let mut struct_type = (*self.structs[struct_idx]).clone();
                     struct_type.fields = fields;
-                    self.structs[struct_idx] = Arc::new(struct_type);
+                    self.structs[struct_idx] = Rc::new(struct_type);
                 }
             }
             struct_idx += 1;
@@ -365,13 +389,13 @@ impl ModuleCache {
         &self,
         struct_name: &IdentStr,
         module_id: &ModuleId,
-    ) -> PartialVMResult<(usize, Arc<StructType>)> {
+    ) -> PartialVMResult<(usize, Rc<StructType>)> {
         match self
             .modules
             .get(module_id)
             .and_then(|module| module.struct_map.get(struct_name))
         {
-            Some(struct_idx) => Ok((*struct_idx, Arc::clone(&self.structs[*struct_idx]))),
+            Some(struct_idx) => Ok((*struct_idx, Rc::clone(&self.structs[*struct_idx]))),
             None => Err(
                 PartialVMError::new(StatusCode::TYPE_RESOLUTION_FAILURE).with_message(format!(
                     "Cannot find {:?}::{:?} in cache",
@@ -412,19 +436,19 @@ impl ModuleCache {
 // entities. Each cache is protected by a `Mutex`. Operation in the Loader must be thread safe
 // (operating on values on the stack) and when cache needs updating the mutex must be taken.
 // The `pub(crate)` API is what a Loader offers to the runtime.
+
 pub(crate) struct Loader {
-    scripts: RwLock<ScriptCache>,
-    module_cache: RwLock<ModuleCache>,
-    type_cache: RwLock<TypeCache>,
+    scripts: RefCell<ScriptCache>,
+    module_cache: RefCell<ModuleCache>,
+    type_cache: RefCell<TypeCache>,
 }
 
 impl Loader {
     pub(crate) fn new() -> Self {
-        //println!("new loader");
         Self {
-            scripts: RwLock::new(ScriptCache::new()),
-            module_cache: RwLock::new(ModuleCache::new()),
-            type_cache: RwLock::new(TypeCache::new()),
+            scripts: RefCell::new(ScriptCache::new()),
+            module_cache: RefCell::new(ModuleCache::new()),
+            type_cache: RefCell::new(TypeCache::new()),
         }
     }
 
@@ -446,18 +470,18 @@ impl Loader {
         ty_args: &[TypeTag],
         data_store: &mut impl DataStore,
         log_context: &impl LogContext,
-    ) -> VMResult<(Arc<Function>, Vec<Type>)> {
+    ) -> VMResult<(Rc<Function>, Vec<Type>)> {
         // retrieve or load the script
         let hash_value = HashValue::sha3_256_of(script_blob);
-        let opt_main = self.scripts.read().unwrap().get(&hash_value);
+        let opt_main = self.scripts.borrow().get(&hash_value);
         let main = match opt_main {
             Some(main) => main,
             None => {
                 let ver_script =
                     self.deserialize_and_verify_script(script_blob, data_store, log_context)?;
-                let script = Script::new(ver_script, &hash_value, &self.module_cache.write().unwrap())?;
+                let script = Script::new(ver_script, &hash_value, &self.module_cache.borrow())?;
                 self.scripts
-                    .write().unwrap()
+                    .borrow_mut()
                     .insert(hash_value, script)
                     .map_err(|e| e.finish(Location::Script))?
             }
@@ -536,7 +560,7 @@ impl Loader {
     fn verify_script_dependencies(
         &self,
         script: &CompiledScript,
-        dependencies: Vec<Arc<Module>>,
+        dependencies: Vec<Rc<Module>>,
     ) -> VMResult<()> {
         let mut deps = vec![];
         for dep in &dependencies {
@@ -559,16 +583,16 @@ impl Loader {
         ty_args: &[TypeTag],
         data_store: &mut impl DataStore,
         log_context: &impl LogContext,
-    ) -> VMResult<(Arc<Function>, Vec<Type>)> {
+    ) -> VMResult<(Rc<Function>, Vec<Type>)> {
         self.load_module_expect_no_missing_dependencies(module_id, data_store, log_context)?;
         let idx = self
             .module_cache
-            .read().unwrap()
+            .borrow()
             .resolve_function_by_name(function_name, module_id)
             .map_err(|err| {
                 expect_no_verification_errors(err.finish(Location::Undefined), log_context)
             })?;
-        let func = self.module_cache.read().unwrap().function_at(idx);
+        let func = self.module_cache.borrow().function_at(idx);
 
         // verify type arguments
         let mut type_params = vec![];
@@ -634,7 +658,7 @@ impl Loader {
     fn verify_module_dependencies(
         &self,
         module: &CompiledModule,
-        dependencies: Vec<Arc<Module>>,
+        dependencies: Vec<Rc<Module>>,
     ) -> VMResult<()> {
         let mut deps = vec![];
         for dep in &dependencies {
@@ -712,7 +736,7 @@ impl Loader {
                 )?;
                 let (idx, struct_type) = self
                     .module_cache
-                    .read().unwrap()
+                    .borrow()
                     // GOOD module was loaded above
                     .resolve_struct_by_name(&struct_tag.name, &module_id)
                     .map_err(|e| e.finish(Location::Undefined))?;
@@ -750,7 +774,7 @@ impl Loader {
         data_store: &mut impl DataStore,
         verify_no_missing_modules: bool,
         log_context: &impl LogContext,
-    ) -> VMResult<Arc<Module>> {
+    ) -> VMResult<Rc<Module>> {
         // kept private to `load_module` to prevent verification errors from leaking
         // and not being marked as invariant violations
         fn deserialize_and_verify_module(
@@ -771,7 +795,7 @@ impl Loader {
             Ok(module)
         }
 
-        if let Some(module) = self.module_cache.read().unwrap().module_at(id) {
+        if let Some(module) = self.module_cache.borrow().module_at(id) {
             return Ok(module);
         }
 
@@ -788,7 +812,7 @@ impl Loader {
         let module = deserialize_and_verify_module(self, bytes, data_store, log_context)
             .map_err(|err| expect_no_verification_errors(err, log_context))?;
         self.module_cache
-            .write().unwrap()
+            .borrow_mut()
             .insert(id.clone(), module, log_context)
     }
 
@@ -798,7 +822,7 @@ impl Loader {
         id: &ModuleId,
         data_store: &mut impl DataStore,
         log_context: &impl LogContext,
-    ) -> VMResult<Arc<Module>> {
+    ) -> VMResult<Rc<Module>> {
         self.load_module(id, data_store, true, log_context)
     }
 
@@ -808,7 +832,7 @@ impl Loader {
         id: &ModuleId,
         data_store: &mut impl DataStore,
         log_context: &impl LogContext,
-    ) -> VMResult<Arc<Module>> {
+    ) -> VMResult<Rc<Module>> {
         self.load_module(id, data_store, false, log_context)
     }
 
@@ -818,7 +842,7 @@ impl Loader {
         deps: Vec<ModuleId>,
         data_store: &mut impl DataStore,
         log_context: &impl LogContext,
-    ) -> VMResult<Vec<Arc<Module>>> {
+    ) -> VMResult<Vec<Rc<Module>>> {
         deps.into_iter()
             .map(|dep| {
                 self.load_module_verify_no_missing_dependencies(&dep, data_store, log_context)
@@ -832,7 +856,7 @@ impl Loader {
         deps: Vec<ModuleId>,
         data_store: &mut impl DataStore,
         log_context: &impl LogContext,
-    ) -> VMResult<Vec<Arc<Module>>> {
+    ) -> VMResult<Vec<Rc<Module>>> {
         deps.into_iter()
             .map(|dep| {
                 self.load_module_expect_no_missing_dependencies(&dep, data_store, log_context)
@@ -866,28 +890,85 @@ impl Loader {
     // Internal helpers
     //
 
-    fn function_at(&self, idx: usize) -> Arc<Function> {
-        self.module_cache.read().unwrap().function_at(idx)
+    fn function_at(&self, idx: usize) -> Rc<Function> {
+
+        let read_lock = self.module_cache.borrow();
+        let fun = read_lock.function_at(idx);
+        fun
+
+        /*
+        let mut size;
+        let mut spin_enter = 0;
+        let mut spin_exit = 0;
+
+        loop {
+            size = self.flag.load(Ordering::Relaxed);
+
+            if idx < size && size != BUSY_FLAG {
+                let prev = self.flag.compare_and_swap(size, BUSY_FLAG, Ordering::Acquire);
+                if prev == size {
+                    let read_vec = unsafe { &*self.function_read_cache.get() };
+                    let fun = Arc::clone(&read_vec[idx]);
+                    self.flag.store(size, Ordering::Release);
+                    return fun;
+                }
+            }
+            if !(idx < size) {
+                break
+            }
+            spin_enter += 1;
+            spin_loop_hint();
+        }
+
+        let read_lock = self.module_cache.borrow();
+        let fun = read_lock.function_at(idx);
+        let new_vec = read_lock.clone_functions();
+
+        loop {
+            size = self.flag.load(Ordering::Relaxed);
+            if size != BUSY_FLAG {
+
+                if new_vec.len() <= size {
+                    break
+                }
+
+                let prev = self.flag.compare_and_swap(size, BUSY_FLAG, Ordering::Acquire);
+                let write_vec = unsafe { &mut *self.function_read_cache.get() };
+
+                let new_size = new_vec.len();
+                *write_vec = new_vec;
+
+                self.flag.store(new_size, Ordering::Release);
+                break
+            }
+            spin_exit += 1;
+            spin_loop_hint();
+
+        }
+
+        return fun;
+
+        */
     }
 
-    fn struct_at(&self, idx: usize) -> Arc<StructType> {
-        self.module_cache.read().unwrap().struct_at(idx)
+    fn struct_at(&self, idx: usize) -> Rc<StructType> {
+        self.module_cache.borrow().struct_at(idx)
     }
 
-    fn get_module(&self, idx: &ModuleId) -> Arc<Module> {
-        Arc::clone(
+    fn get_module(&self, idx: &ModuleId) -> Rc<Module> {
+        Rc::clone(
             self.module_cache
-            .read().unwrap()
+            .borrow()
                 .modules
                 .get(idx)
                 .expect("ModuleId on Function must exist"),
         )
     }
 
-    fn get_script(&self, hash: &HashValue) -> Arc<Script> {
-        Arc::clone(
+    fn get_script(&self, hash: &HashValue) -> Rc<Script> {
+        Rc::clone(
             self.scripts
-            .read().unwrap()
+            .borrow()
                 .scripts
                 .get(hash)
                 .expect("Script hash on Function must exist"),
@@ -896,9 +977,9 @@ impl Loader {
 
     fn is_resource(&self, type_: &Type) -> bool {
         match type_ {
-            Type::Struct(idx) => self.module_cache.read().unwrap().struct_at(*idx).is_resource,
+            Type::Struct(idx) => self.module_cache.borrow().struct_at(*idx).is_resource,
             Type::StructInstantiation(idx, instantiation) => {
-                if self.module_cache.read().unwrap().struct_at(*idx).is_resource {
+                if self.module_cache.borrow().struct_at(*idx).is_resource {
                     true
                 } else {
                     for ty in instantiation {
@@ -920,9 +1001,10 @@ impl Loader {
 //
 
 // A simple wrapper for a `Module` or a `Script` in the `Resolver`
+#[derive(Clone)]
 enum BinaryType {
-    Module(Arc<Module>),
-    Script(Arc<Script>),
+    Module(Rc<Module>),
+    Script(Rc<Script>),
 }
 
 // A Resolver is a simple and small structure allocated on the stack and used by the
@@ -934,13 +1016,22 @@ pub(crate) struct Resolver<'a> {
 }
 
 impl<'a> Resolver<'a> {
-    fn for_module(loader: &'a Loader, module: Arc<Module>) -> Self {
+
+    /* Older simple variants for reference
+
+    fn for_module(loader: &'a Loader, module: Rc<Module>) -> Self {
         let binary = BinaryType::Module(module);
         Self { loader, binary }
     }
 
-    fn for_script(loader: &'a Loader, script: Arc<Script>) -> Self {
+    fn for_script(loader: &'a Loader, script: Rc<Script>) -> Self {
         let binary = BinaryType::Script(script);
+        Self { loader, binary }
+    }
+
+    */
+
+    fn for_binary_type(loader: &'a Loader, binary: BinaryType) -> Self {
         Self { loader, binary }
     }
 
@@ -959,7 +1050,7 @@ impl<'a> Resolver<'a> {
     // Function resolution
     //
 
-    pub(crate) fn function_from_handle(&self, idx: FunctionHandleIndex) -> Arc<Function> {
+    pub(crate) fn function_from_handle(&self, idx: FunctionHandleIndex) -> Rc<Function> {
         let idx = match &self.binary {
             BinaryType::Module(module) => module.function_at(idx.0),
             BinaryType::Script(script) => script.function_at(idx.0),
@@ -970,7 +1061,7 @@ impl<'a> Resolver<'a> {
     pub(crate) fn function_from_instantiation(
         &self,
         idx: FunctionInstantiationIndex,
-    ) -> Arc<Function> {
+    ) -> Rc<Function> {
         let func_inst = match &self.binary {
             BinaryType::Module(module) => module.function_instantiation_at(idx.0),
             BinaryType::Script(script) => script.function_instantiation_at(idx.0),
@@ -1009,7 +1100,7 @@ impl<'a> Resolver<'a> {
     // Type resolution
     //
 
-    pub(crate) fn struct_from_definition(&self, idx: StructDefinitionIndex) -> Arc<StructType> {
+    pub(crate) fn struct_from_definition(&self, idx: StructDefinitionIndex) -> Rc<StructType> {
         match &self.binary {
             BinaryType::Module(module) => {
                 let gidx = module.struct_at(idx);
@@ -1364,7 +1455,7 @@ struct Script {
     function_instantiations: Vec<FunctionInstantiation>,
 
     // entry point
-    main: Arc<Function>,
+    main: Rc<Function>,
 }
 
 impl Script {
@@ -1435,7 +1526,7 @@ impl Script {
         // TODO: main does not have a name. Revisit.
         let name = Identifier::new("main").unwrap();
         let native = None; // Script entries cannot be native
-        let main: Arc<Function> = Arc::new(Function {
+        let main: Rc<Function> = Rc::new(Function {
             index: FunctionDefinitionIndex(0),
             code,
             parameters,
@@ -1445,6 +1536,9 @@ impl Script {
             native,
             scope,
             name,
+
+            // Populate dynamically
+            resolver_token: RefCell::new(None),
         });
 
         Ok(Self {
@@ -1456,7 +1550,7 @@ impl Script {
         })
     }
 
-    fn entry_point(&self) -> Arc<Function> {
+    fn entry_point(&self) -> Rc<Function> {
         self.main.clone()
     }
 
@@ -1466,6 +1560,18 @@ impl Script {
 
     fn function_instantiation_at(&self, idx: u16) -> &FunctionInstantiation {
         &self.function_instantiations[idx as usize]
+    }
+}
+
+#[derive(Clone)]
+pub struct ResolverToken {
+    bin_type: BinaryType,
+}
+
+use std::fmt;
+impl Debug for ResolverToken {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "")
     }
 }
 
@@ -1488,6 +1594,9 @@ pub(crate) struct Function {
     native: Option<NativeFunction>,
     scope: Scope,
     name: Identifier,
+
+    // Populate dynamically
+    resolver_token: RefCell<Option<ResolverToken>>,
 }
 
 impl Function {
@@ -1537,6 +1646,7 @@ impl Function {
             native,
             scope,
             name,
+            resolver_token : RefCell::new(None),
         }
     }
 
@@ -1551,6 +1661,8 @@ impl Function {
         self.index
     }
 
+    /* Older version for reference
+
     pub(crate) fn get_resolver<'a>(&self, loader: &'a Loader) -> Resolver<'a> {
         match &self.scope {
             Scope::Module(module_id) => {
@@ -1562,6 +1674,35 @@ impl Function {
                 Resolver::for_script(loader, script)
             }
         }
+    }
+
+    */
+
+    pub(crate) fn get_resolver_from_token<'a>(&self, token : ResolverToken, loader: &'a Loader) -> Resolver<'a> {
+        Resolver::for_binary_type(loader, token.bin_type)
+    }
+
+
+
+    pub(crate) fn get_resolver_token<'a>(&self, loader: &'a Loader) -> ResolverToken {
+
+        if let Some(token) = self.resolver_token.borrow().as_ref() {
+            return token.clone();
+        }
+
+        let token = match &self.scope {
+            Scope::Module(module_id) => {
+                let module = loader.get_module(module_id);
+                ResolverToken { bin_type : BinaryType::Module(module) }
+            }
+            Scope::Script(script_hash) => {
+                let script = loader.get_script(script_hash);
+                ResolverToken { bin_type : BinaryType::Script(script) }
+            }
+        };
+
+        *self.resolver_token.borrow_mut() = Some(token.clone());
+        token.clone()
     }
 
     pub(crate) fn local_count(&self) -> usize {
@@ -1755,7 +1896,7 @@ const VALUE_DEPTH_MAX: usize = 256;
 
 impl Loader {
     fn struct_gidx_to_type_tag(&self, gidx: usize, ty_args: &[Type]) -> PartialVMResult<StructTag> {
-        if let Some(struct_map) = self.type_cache.read().unwrap().structs.get(&gidx) {
+        if let Some(struct_map) = self.type_cache.borrow().structs.get(&gidx) {
             if let Some(struct_info) = struct_map.get(ty_args) {
                 if let Some(struct_tag) = &struct_info.struct_tag {
                     return Ok(struct_tag.clone());
@@ -1767,7 +1908,7 @@ impl Loader {
             .iter()
             .map(|ty| self.type_to_type_tag(ty))
             .collect::<PartialVMResult<Vec<_>>>()?;
-        let struct_type = self.module_cache.read().unwrap().struct_at(gidx);
+        let struct_type = self.module_cache.borrow().struct_at(gidx);
         let struct_tag = StructTag {
             address: *struct_type.module.address(),
             module: struct_type.module.name().to_owned(),
@@ -1776,7 +1917,7 @@ impl Loader {
         };
 
         self.type_cache
-            .write().unwrap()
+            .borrow_mut()
             .structs
             .entry(gidx)
             .or_insert_with(HashMap::new)
@@ -1815,7 +1956,7 @@ impl Loader {
         ty_args: &[Type],
         depth: usize,
     ) -> PartialVMResult<MoveStructLayout> {
-        if let Some(struct_map) = self.type_cache.read().unwrap().structs.get(&gidx) {
+        if let Some(struct_map) = self.type_cache.borrow().structs.get(&gidx) {
             if let Some(struct_info) = struct_map.get(ty_args) {
                 if let Some(layout) = &struct_info.struct_layout {
                     return Ok(layout.clone());
@@ -1823,7 +1964,7 @@ impl Loader {
             }
         }
 
-        let struct_type = self.module_cache.read().unwrap().struct_at(gidx);
+        let struct_type = self.module_cache.borrow().struct_at(gidx);
         let field_tys = struct_type
             .fields
             .iter()
@@ -1836,7 +1977,7 @@ impl Loader {
         let struct_layout = MoveStructLayout::new(field_layouts);
 
         self.type_cache
-            .write().unwrap()
+            .borrow_mut()
             .structs
             .entry(gidx)
             .or_insert_with(HashMap::new)
@@ -1882,7 +2023,7 @@ impl Loader {
         ty_args: &[Type],
         depth: usize,
     ) -> PartialVMResult<(MoveKind, Vec<MoveKindInfo>)> {
-        if let Some(struct_map) = self.type_cache.read().unwrap().structs.get(&gidx) {
+        if let Some(struct_map) = self.type_cache.borrow().structs.get(&gidx) {
             if let Some(struct_info) = struct_map.get(ty_args) {
                 if let Some(kind_info) = &struct_info.kind_info {
                     return Ok(kind_info.clone());
@@ -1890,7 +2031,7 @@ impl Loader {
             }
         }
 
-        let struct_type = self.module_cache.read().unwrap().struct_at(gidx);
+        let struct_type = self.module_cache.borrow().struct_at(gidx);
 
         let mut is_resource = struct_type.is_resource;
         if !is_resource {
@@ -1912,7 +2053,7 @@ impl Loader {
         let kind_info = (MoveKind::from_bool(is_resource), field_kind_info);
 
         self.type_cache
-            .write().unwrap()
+            .borrow_mut()
             .structs
             .entry(gidx)
             .or_insert_with(HashMap::new)
